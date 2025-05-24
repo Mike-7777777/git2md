@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>管理面板 - GitHub 仓库内容聚合导出工具</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1><i class="fas fa-cog"></i> 管理面板</h1>
+            <p class="subtitle">系统配置和缓存管理</p>
+            <div class="header-actions">
+                <a href="/settings" class="admin-link">
+                    <i class="fas fa-cog"></i> 系统设置
+                </a>
+                <a href="/" class="admin-link">
+                    <i class="fas fa-home"></i> 返回首页
+                </a>
+            </div>
+        </header>
+
+        <div class="main-content">
+            <!-- GitHub Token配置 -->
+            <div class="admin-section">
+                <h3><i class="fab fa-github"></i> GitHub Token 配置</h3>
+                <div class="status-card {% if cache_stats.github_token_set %}success{% else %}warning{% endif %}">
+                    <div class="status-info">
+                        {% if cache_stats.github_token_set %}
+                        <i class="fas fa-check-circle"></i>
+                        <span>GitHub Token 已配置</span>
+                        <small>API请求限制已提升，推荐用于生产环境</small>
+                        {% else %}
+                        <i class="fas fa-exclamation-triangle"></i>
+                        <span>GitHub Token 未配置</span>
+                        <small>使用匿名API，可能遇到频率限制</small>
+                        {% endif %}
+                    </div>
+                </div>
+                
+                <div class="config-info">
+                    <h4>如何配置 GitHub Token：</h4>
+                    <ol>
+                        <li>访问 <a href="https://github.com/settings/tokens" target="_blank">GitHub Token 设置页面</a></li>
+                        <li>点击 "Generate new token (classic)"</li>
+                        <li>勾选 "public_repo" 权限</li>
+                        <li>复制生成的 token</li>
+                        <li>设置环境变量：<code>GITHUB_TOKEN=your_token_here</code></li>
+                        <li>重启应用</li>
+                    </ol>
+                </div>
+            </div>
+
+            <!-- 缓存管理 -->
+            <div class="admin-section">
+                <h3><i class="fas fa-database"></i> 缓存管理</h3>
+                <div class="cache-stats">
+                    <div class="stat-card">
+                        <i class="fas fa-file"></i>
+                        <div class="stat-info">
+                            <span class="stat-value">{{ cache_stats.cache_files }}</span>
+                            <span class="stat-label">缓存文件</span>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <i class="fas fa-hdd"></i>
+                        <div class="stat-info">
+                            <span class="stat-value">{{ "%.1f"|format(cache_stats.cache_size / 1024) }} KB</span>
+                            <span class="stat-label">缓存大小</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="cache-actions">
+                    <button id="clearCacheBtn" class="btn btn-outline">
+                        <i class="fas fa-trash"></i> 清理缓存
+                    </button>
+                    <small class="help-text">清理缓存将删除所有已缓存的仓库数据，下次访问时会重新获取</small>
+                </div>
+            </div>
+
+            <!-- 系统状态 -->
+            <div class="admin-section">
+                <h3><i class="fas fa-heart"></i> 系统状态</h3>
+                <div class="system-status">
+                    <div class="status-item">
+                        <span class="status-label">应用版本</span>
+                        <span class="status-value">v1.0.0</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">GitHub API状态</span>
+                        <span class="status-value" id="apiStatus">检查中...</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">缓存状态</span>
+                        <span class="status-value">正常</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 配置参数 -->
+            <div class="admin-section">
+                <h3><i class="fas fa-sliders-h"></i> 当前配置</h3>
+                <div class="config-table">
+                    <div class="config-row">
+                        <span class="config-key">最大仓库大小</span>
+                        <span class="config-value">100 MB</span>
+                    </div>
+                    <div class="config-row">
+                        <span class="config-key">最大文件数量</span>
+                        <span class="config-value">2000 个</span>
+                    </div>
+                    <div class="config-row">
+                        <span class="config-key">单文件大小限制</span>
+                        <span class="config-value">1 MB</span>
+                    </div>
+                    <div class="config-row">
+                        <span class="config-key">文件保留时间</span>
+                        <span class="config-value">30 分钟</span>
+                    </div>
+                    <div class="config-row">
+                        <span class="config-key">请求延迟</span>
+                        <span class="config-value">0.5 秒</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 操作按钮 -->
+            <div class="admin-actions">
+                <a href="/" class="btn btn-primary">
+                    <i class="fas fa-arrow-left"></i> 返回首页
+                </a>
+                <button id="checkHealthBtn" class="btn btn-secondary">
+                    <i class="fas fa-stethoscope"></i> 健康检查
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <footer class="footer">
+        <p>&copy; 2024 GitHub仓库聚合导出工具 管理面板</p>
+    </footer>
+
+    <style>
+        .admin-section {
+            margin-bottom: 40px;
+            padding: 30px;
+            background: #f8f9fa;
+            border-radius: 12px;
+            border-left: 4px solid #667eea;
+        }
+
+        .admin-section h3 {
+            color: #555;
+            margin-bottom: 20px;
+            font-size: 1.3rem;
+            display: flex;
+            align-items: center;
+        }
+
+        .admin-section h3 i {
+            margin-right: 10px;
+            color: #667eea;
+        }
+
+        .status-card.warning {
+            background: linear-gradient(135deg, #f39c12, #e67e22);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+
+        .status-info {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .status-info i {
+            font-size: 1.5rem;
+        }
+
+        .status-info small {
+            display: block;
+            opacity: 0.9;
+            margin-top: 5px;
+        }
+
+        .config-info {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+
+        .config-info h4 {
+            color: #667eea;
+            margin-bottom: 15px;
+        }
+
+        .config-info ol {
+            padding-left: 20px;
+        }
+
+        .config-info li {
+            margin-bottom: 8px;
+            color: #666;
+        }
+
+        .config-info code {
+            background: #f1f3f4;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: monospace;
+        }
+
+        .cache-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .stat-card i {
+            font-size: 2rem;
+            color: #667eea;
+        }
+
+        .stat-value {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #333;
+            display: block;
+        }
+
+        .stat-label {
+            color: #666;
+            font-size: 0.9rem;
+        }
+
+        .cache-actions {
+            text-align: center;
+        }
+
+        .system-status {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+        }
+
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #eee;
+        }
+
+        .status-item:last-child {
+            border-bottom: none;
+        }
+
+        .status-label {
+            color: #666;
+        }
+
+        .status-value {
+            font-weight: bold;
+            color: #333;
+        }
+
+        .config-table {
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .config-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 15px 20px;
+            border-bottom: 1px solid #eee;
+        }
+
+        .config-row:last-child {
+            border-bottom: none;
+        }
+
+        .config-key {
+            color: #666;
+        }
+
+        .config-value {
+            font-weight: bold;
+            color: #333;
+        }
+
+        .admin-actions {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+            margin-top: 40px;
+        }
+
+        @media (max-width: 768px) {
+            .admin-actions {
+                flex-direction: column;
+                align-items: stretch;
+            }
+        }
+    </style>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // 清理缓存按钮
+            document.getElementById('clearCacheBtn').addEventListener('click', async () => {
+                if (!confirm('确定要清理所有缓存吗？这将删除所有已缓存的仓库数据。')) {
+                    return;
+                }
+
+                const btn = document.getElementById('clearCacheBtn');
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 清理中...';
+
+                try {
+                    const response = await fetch('/admin/clear-cache', {
+                        method: 'POST'
+                    });
+                    const result = await response.json();
+
+                    if (response.ok) {
+                        alert('缓存清理成功！');
+                        location.reload();
+                    } else {
+                        alert('清理失败：' + result.message);
+                    }
+                } catch (error) {
+                    alert('清理失败：' + error.message);
+                } finally {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fas fa-trash"></i> 清理缓存';
+                }
+            });
+
+            // 健康检查
+            document.getElementById('checkHealthBtn').addEventListener('click', async () => {
+                const btn = document.getElementById('checkHealthBtn');
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 检查中...';
+
+                try {
+                    const response = await fetch('/health');
+                    const result = await response.json();
+
+                    if (response.ok) {
+                        alert('系统状态正常！\n版本：' + result.version + '\nGitHub Token：' + (result.github_token_configured ? '已配置' : '未配置'));
+                    } else {
+                        alert('健康检查失败');
+                    }
+                } catch (error) {
+                    alert('检查失败：' + error.message);
+                } finally {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fas fa-stethoscope"></i> 健康检查';
+                }
+            });
+
+            // 检查API状态
+            checkApiStatus();
+
+            async function checkApiStatus() {
+                try {
+                    const response = await fetch('/health');
+                    const result = await response.json();
+                    
+                    const statusElement = document.getElementById('apiStatus');
+                    if (response.ok) {
+                        statusElement.textContent = result.github_token_configured ? '正常 (已认证)' : '正常 (未认证)';
+                        statusElement.style.color = result.github_token_configured ? '#28a745' : '#f39c12';
+                    } else {
+                        statusElement.textContent = '异常';
+                        statusElement.style.color = '#dc3545';
+                    }
+                } catch (error) {
+                    document.getElementById('apiStatus').textContent = '检查失败';
+                    document.getElementById('apiStatus').style.color = '#dc3545';
+                }
+            }
+        });
+    </script>
+</body>
+</html> 

@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  git2md:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=production
+      - SECRET_KEY=${SECRET_KEY:-change-this-secret-key-in-production}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+    volumes:
+      - ./downloads:/app/downloads
+      - ./logs:/app/logs
+      - ./cache:/app/cache
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    user: "${UID:-1000}:${GID:-1000}"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.git2md.rule=Host(`git2md.yourdomain.com`)"
+      - "traefik.http.routers.git2md.entrypoints=websecure"
+      - "traefik.http.routers.git2md.tls.certresolver=myresolver"
+
+volumes:
+  downloads:
+  logs:
+  cache: 
