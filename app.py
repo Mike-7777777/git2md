@@ -10,6 +10,9 @@ from utils.validator import Validator, ValidationError
 from utils.github_handler import GitHubHandler, GitHubError
 from utils.file_processor import FileProcessor
 import requests
+import uuid
+from threading import Thread
+import shutil
 
 # 加载.env文件
 load_dotenv()
@@ -33,6 +36,104 @@ logger = logging.getLogger(__name__)
 # 初始化定时任务调度器
 scheduler = BackgroundScheduler()
 scheduler.start()
+
+# 任务存储
+tasks = {}
+
+def process_export_task(task_id, params, logger):
+    """在后台线程中处理导出任务"""
+    try:
+        tasks[task_id]['status'] = 'processing'
+        tasks[task_id]['progress'] = 0
+        tasks[task_id]['stage'] = '初始化'
+        
+        github_handler = GitHubHandler()
+        
+        def progress_callback(processed, total):
+            progress = int((processed / total) * 100)
+            tasks[task_id]['progress'] = progress
+            if progress < 100:
+                tasks[task_id]['stage'] = f'下载文件 {processed}/{total}'
+            else:
+                tasks[task_id]['stage'] = '合并文件'
+
+        # 获取文件列表
+        tasks[task_id]['stage'] = '获取文件列表'
+        files = github_handler.list_repository_contents(
+            params['owner'], params['repo'], params['branch']
+        )
+        
+        # 过滤
+        file_processor = FileProcessor(
+            file_types=params['file_types'],
+            exclude_names=params['exclude_names'],
+            exclude_dirs=params['exclude_dirs'],
+            use_default_filters=params.get('use_default_filters', False)
+        )
+        filtered_files = file_processor.filter_files(files)
+        
+        if not filtered_files:
+            raise Exception("没有符合条件的文件")
+
+        # 获取文件内容
+        file_paths = [f['path'] for f in filtered_files]
+        files_content = github_handler.get_file_content_batch(
+            params['owner'], params['repo'], file_paths, params['branch'], progress_callback
+        )
+        
+        output_mode = params.get('output_mode', 'single')
+
+        if output_mode == 'split' and params['output_format'] == 'md':
+            tasks[task_id]['stage'] = '切分并保存文件'
+            saved_file_info = file_processor.save_split_files(
+                files_content, params['repo'], params['output_format']
+            )
+            
+            # 将文件夹打包成zip
+            tasks[task_id]['stage'] = '压缩文件'
+            folder_to_zip = saved_file_info['file_path']
+            zip_filename = f"{saved_file_info['file_name']}.zip"
+            zip_filepath = os.path.join(Config.DOWNLOAD_FOLDER, zip_filename)
+            
+            shutil.make_archive(os.path.join(Config.DOWNLOAD_FOLDER, saved_file_info['file_name']), 'zip', folder_to_zip)
+            
+            # 删除原文件夹
+            shutil.rmtree(folder_to_zip)
+
+            tasks[task_id]['status'] = 'success'
+            tasks[task_id]['result'] = {
+                'file_count': saved_file_info['file_count'],
+                'download_url': f'/download_folder/{zip_filename}',
+                'file_size': os.path.getsize(zip_filepath),
+                'output_mode': 'split'
+            }
+        else:
+            # 合并
+            tasks[task_id]['stage'] = '合并内容'
+            merged_content, total_size = file_processor.merge_files_content(
+                files_content, params['output_format'], params['repo']
+            )
+
+            # 保存
+            tasks[task_id]['stage'] = '保存文件'
+            output_filename = file_processor.generate_output_filename(
+                params['repo'], params['output_format']
+            )
+            saved_file_info = file_processor.save_merged_file(merged_content, output_filename)
+            
+            tasks[task_id]['status'] = 'success'
+            tasks[task_id]['result'] = {
+                'download_url': f'/files/{output_filename}',
+                'file_size': saved_file_info['file_size'],
+                'file_count': len(files_content),
+                'output_mode': 'single'
+            }
+
+    except Exception as e:
+        logger.exception(f"任务 {task_id} 失败")
+        tasks[task_id]['status'] = 'error'
+        tasks[task_id]['message'] = str(e)
+
 
 def cleanup_old_files():
     """清理过期的下载文件"""
@@ -70,179 +171,80 @@ def index():
 
 @app.route('/download', methods=['POST'])
 def download():
-    """处理下载请求"""
+    """开始一个导出任务"""
     start_time = time.time()
     
     try:
-        # 获取请求参数
-        if request.is_json:
-            params = request.get_json()
-        else:
-            params = request.form.to_dict()
+        params = request.json
+        if not params:
+            return jsonify({'status': 'error', 'message': '无效的请求'}), 400
         
         logger.info(f"收到下载请求: {params}")
-        
+
         # 参数校验
         try:
             validated_params = Validator.validate_all_params(params)
         except ValidationError as e:
             logger.warning(f"参数校验失败: {str(e)}")
-            return jsonify({
-                'status': 'error',
-                'message': str(e)
-            }), 400
-        
-        # 初始化GitHub处理器
+            return jsonify({'status': 'error', 'message': str(e)}), 400
+
+        # 获取仓库信息以确定默认分支
         github_handler = GitHubHandler()
-        
-        # 获取仓库信息
         try:
-            repo_info = github_handler.get_repo_info(
-                validated_params['owner'], 
-                validated_params['repo']
-            )
-            logger.info(f"仓库信息: {repo_info}")
-            
+            repo_info = github_handler.get_repo_info(validated_params['owner'], validated_params['repo'])
+            validated_params['branch'] = repo_info['default_branch']
+
             if repo_info['private']:
                 return jsonify({
                     'status': 'error',
                     'message': '不支持私有仓库'
                 }), 400
-                
+
         except GitHubError as e:
             logger.error(f"获取仓库信息失败: {str(e)}")
-            return jsonify({
-                'status': 'error',
-                'message': str(e)
-            }), 400
+            return jsonify({'status': 'error', 'message': str(e)}), 400
+
+        task_id = str(uuid.uuid4())
+        tasks[task_id] = {'status': 'pending'}
         
-        # 获取文件列表
-        try:
-            files = github_handler.list_repository_contents(
-                validated_params['owner'],
-                validated_params['repo'],
-                repo_info['default_branch']
-            )
-            logger.info(f"获取到 {len(files)} 个文件")
-            
-        except GitHubError as e:
-            logger.error(f"获取文件列表失败: {str(e)}")
-            return jsonify({
-                'status': 'error',
-                'message': str(e)
-            }), 400
+        thread = Thread(target=process_export_task, args=(task_id, validated_params, logger))
+        thread.start()
         
-        # 过滤文件
-        file_processor = FileProcessor(
-            file_types=validated_params['file_types'],
-            exclude_names=validated_params['exclude_names'],
-            exclude_dirs=validated_params['exclude_dirs'],
-            use_default_filters=validated_params.get('use_default_filters', False)
-        )
-        
-        filtered_files = file_processor.filter_files(files)
-        logger.info(f"过滤后剩余 {len(filtered_files)} 个文件")
-        
-        if not filtered_files:
-            return jsonify({
-                'status': 'error',
-                'message': '没有符合条件的文件，请检查过滤条件'
-            }), 400
-        
-        # 获取文件内容
-        files_content = []
-        total_processed_size = 0
-        
-        # 使用批量处理获取文件内容
-        file_paths = [file_info['path'] for file_info in filtered_files]
-        
-        try:
-            logger.info(f"开始批量获取 {len(file_paths)} 个文件的内容")
-            files_content = github_handler.get_file_content_batch(
-                validated_params['owner'],
-                validated_params['repo'],
-                file_paths,
-                repo_info['default_branch']
-            )
-            
-            # 计算总大小
-            for file_content in files_content:
-                total_processed_size += file_content.get('size', 0)
-                
-            logger.info(f"批量处理完成，总文件大小: {total_processed_size} 字节")
-            
-        except GitHubError as e:
-            logger.error(f"批量获取文件内容失败: {str(e)}")
-            return jsonify({
-                'status': 'error',
-                'message': str(e)
-            }), 400
-        
-        # 合并文件内容
-        merged_content, _ = file_processor.merge_files_content(
-            files_content,
-            validated_params['output_format'],
-            validated_params['repo']
-        )
-        
-        # 生成文件名并保存
-        output_filename = file_processor.generate_output_filename(
-            validated_params['repo'],
-            validated_params['output_format']
-        )
-        
-        try:
-            saved_file_info = file_processor.save_merged_file(merged_content, output_filename)
-            
-            processing_time = time.time() - start_time
-            
-            logger.info(f"处理完成: {output_filename}, 耗时: {processing_time:.2f}秒")
-            
-            return jsonify({
-                'status': 'success',
-                'download_url': f'/files/{output_filename}',
-                'file_size': saved_file_info['file_size'],
-                'file_count': len(files_content),
-                'processing_time': round(processing_time, 2),
-                'message': '导出成功'
-            })
-            
-        except Exception as e:
-            logger.error(f"保存文件失败: {str(e)}")
-            return jsonify({
-                'status': 'error',
-                'message': f'保存文件失败: {str(e)}'
-            }), 500
-    
+        return jsonify({'status': 'processing', 'task_id': task_id})
+
     except Exception as e:
-        logger.error(f"处理请求时发生未知错误: {str(e)}")
+        logger.error(f"启动任务时发生错误: {str(e)}")
         return jsonify({
             'status': 'error',
-            'message': '服务器内部错误，请稍后重试'
+            'message': '启动任务失败'
         }), 500
 
-@app.route('/files/<filename>')
+@app.route('/status/<task_id>')
+def task_status(task_id):
+    """获取任务状态"""
+    task = tasks.get(task_id)
+    if not task:
+        return jsonify({'status': 'error', 'message': '任务不存在'}), 404
+    
+    return jsonify(task)
+
+@app.route('/files/<path:filename>')
 def download_file(filename):
-    """下载文件"""
-    try:
-        file_path = os.path.join(Config.DOWNLOAD_FOLDER, filename)
-        
-        if not os.path.exists(file_path):
-            logger.warning(f"文件不存在: {filename}")
-            abort(404)
-        
-        logger.info(f"下载文件: {filename}")
-        
-        return send_file(
-            file_path,
-            as_attachment=True,
-            download_name=filename,
-            mimetype='application/octet-stream'
-        )
-        
-    except Exception as e:
-        logger.error(f"下载文件失败 {filename}: {str(e)}")
-        abort(500)
+    """下载单个文件"""
+    file_path = os.path.join(Config.DOWNLOAD_FOLDER, filename)
+    if not os.path.exists(file_path):
+        abort(404, description="文件未找到或已过期")
+    return send_file(file_path, as_attachment=True)
+
+
+@app.route('/download_folder/<path:filename>')
+def download_folder(filename):
+    """下载打包的文件夹"""
+    file_path = os.path.join(Config.DOWNLOAD_FOLDER, filename)
+    if not os.path.exists(file_path):
+        abort(404, description="文件未找到或已过期")
+    return send_file(file_path, as_attachment=True, mimetype='application/zip')
+
 
 @app.route('/admin')
 def admin():

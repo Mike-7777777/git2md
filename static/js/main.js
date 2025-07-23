@@ -13,7 +13,38 @@ class GitHubExporter {
     
     init() {
         // 绑定事件
-        this.form.addEventListener('submit', this.handleSubmit.bind(this));
+        this.form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            this.hideAllStatus();
+            this.statusArea.style.display = 'block';
+            this.loadingStatus.style.display = 'block';
+            this.exportBtn.disabled = true;
+            this.exportBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 处理中...';
+
+            this.updateProgress(0, '正在初始化...');
+
+            const formData = new FormData(this.form);
+            const data = Object.fromEntries(formData.entries());
+
+            try {
+                const response = await fetch('/download', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+
+                const result = await response.json();
+
+                if (response.ok && result.task_id) {
+                    this.pollTaskStatus(result.task_id);
+                } else {
+                    this.showError(result.message || '启动任务失败');
+                }
+            } catch (error) {
+                this.showError('请求失败，请检查网络连接');
+            }
+        });
         this.retryBtn.addEventListener('click', this.handleRetry.bind(this));
         
         // 表单重置时隐藏状态区域
@@ -45,6 +76,7 @@ class GitHubExporter {
             exclude_names: formData.get('exclude_names'),
             exclude_dirs: formData.get('exclude_dirs'),
             output_format: formData.get('output_format'),
+            output_mode: formData.get('output_mode'),
             use_default_filters: formData.get('use_default_filters') === 'on'
         };
         
@@ -70,14 +102,19 @@ class GitHubExporter {
             const result = await response.json();
             
             if (response.ok) {
-                this.showSuccess(result);
+                if (result.task_id) {
+                    this.pollTaskStatus(result.task_id);
+                } else {
+                     this.showError(result.message || '启动任务失败');
+                     this.enableForm();
+                }
             } else {
                 this.showError(result.message || '处理失败，请稍后重试');
+                this.enableForm();
             }
         } catch (error) {
             console.error('Error:', error);
             this.showError('网络错误，请检查网络连接后重试');
-        } finally {
             this.enableForm();
         }
     }
@@ -124,33 +161,66 @@ class GitHubExporter {
         // 保存interval引用，以便在成功或失败时清除
         this.progressInterval = interval;
     }
+
+    pollTaskStatus(taskId) {
+        const interval = setInterval(async () => {
+            try {
+                const response = await fetch(`/status/${taskId}`);
+                const result = await response.json();
+
+                if (result.status === 'processing') {
+                    this.showLoading(result.stage, result.progress);
+                } else {
+                    clearInterval(interval);
+                    this.enableForm();
+                    if (result.status === 'success') {
+                        this.showSuccess(result.result);
+                    } else {
+                        this.showError(result.message);
+                    }
+                }
+            } catch (error) {
+                clearInterval(interval);
+                this.showError('无法获取任务状态');
+                this.enableForm();
+            }
+        }, 2000);
+    }
+
+    updateProgress(percentage, message) {
+        const progressFill = this.loadingStatus.querySelector('.progress-fill');
+        const loadingMessage = document.getElementById('loadingMessage');
+        
+        progressFill.style.width = `${percentage}%`;
+        loadingMessage.textContent = message;
+    }
     
     showSuccess(result) {
-        if (this.progressInterval) {
-            clearInterval(this.progressInterval);
+        let content;
+        const fileSize = (result.file_size / (1024 * 1024)).toFixed(2);
+
+        if (result.output_mode === 'split') {
+            content = `
+                <h4><i class="fas fa-check-circle"></i> 多文件导出成功 (ZIP压缩包)</h4>
+                <p>共处理 ${result.file_count} 个文件，压缩包大小 ${fileSize} MB。</p>
+                <a href="${result.download_url}" class="btn btn-success" download>
+                    <i class="fas fa-download"></i> 下载ZIP压缩包
+                </a>
+                <p class="help-text">文件将在30分钟后被删除。</p>
+            `;
+        } else {
+            content = `
+                <h4><i class="fas fa-check-circle"></i> 导出成功</h4>
+                <p>共处理 ${result.file_count} 个文件，合计 ${fileSize} MB。</p>
+                <a href="${result.download_url}" class="btn btn-success" download>
+                    <i class="fas fa-download"></i> 下载文件
+                </a>
+                <p class="help-text">文件将在30分钟后被删除。</p>
+            `;
         }
         
-        this.hideAllStatus();
-        this.statusArea.style.display = 'block';
-        this.successStatus.style.display = 'block';
-        
-        // 更新结果信息
-        document.getElementById('fileCount').textContent = result.file_count || 0;
-        document.getElementById('fileSize').textContent = this.formatFileSize(result.file_size || 0);
-        document.getElementById('processingTime').textContent = result.processing_time || 0;
-        
-        // 设置下载链接
-        const downloadLink = document.getElementById('downloadLink');
-        downloadLink.href = result.download_url;
-        downloadLink.onclick = () => {
-            // 下载后显示提示
-            setTimeout(() => {
-                this.showDownloadTip();
-            }, 1000);
-        };
-        
-        // 滚动到结果区域
-        this.statusArea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        this.resultDiv.innerHTML = `<div class="status-success">${content}</div>`;
+        this.resultDiv.style.display = 'block';
     }
     
     showError(message) {
@@ -166,6 +236,8 @@ class GitHubExporter {
         
         // 滚动到错误区域
         this.statusArea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        this.exportBtn.disabled = false;
+        this.exportBtn.innerHTML = '<i class="fas fa-download"></i> 开始导出';
     }
     
     hideAllStatus() {
@@ -204,7 +276,7 @@ class GitHubExporter {
         const sizes = ['B', 'KB', 'MB', 'GB'];
         const i = Math.floor(Math.log(bytes) / Math.log(k));
         
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
     }
     
     showDownloadTip() {

@@ -3,7 +3,9 @@ import base64
 import time
 import json
 import os
+import re
 from github import Github, GithubException
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import Config
 
 class GitHubError(Exception):
@@ -12,6 +14,14 @@ class GitHubError(Exception):
 
 class GitHubHandler:
     """GitHub仓库处理器"""
+
+    @staticmethod
+    def parse_repo_url(url):
+        """从URL中解析owner和repo"""
+        match = re.match(r"https://github\.com/([^/]+)/([^/]+)", url)
+        if match:
+            return match.groups()
+        raise ValueError("无效的GitHub仓库URL")
     
     def __init__(self):
         self.github = None
@@ -148,8 +158,73 @@ class GitHubHandler:
                 raise GitHubError(f"获取仓库内容失败：{e.data.get('message', str(e))}")
         except Exception as e:
             raise GitHubError(f"处理仓库内容时出错：{str(e)}")
-    
-    def get_file_content_batch(self, owner, repo_name, file_paths, branch=None):
+
+    def _fetch_file_content(self, repo, file_path, branch, owner, repo_name):
+        """获取单个文件的内容（用于并发执行）"""
+        cache_key = f"file_{owner}_{repo_name}_{branch}_{file_path.replace('/', '_')}"
+        cached = self._get_from_cache(cache_key)
+        if cached:
+            return cached
+
+        try:
+            self._wait_for_rate_limit()
+            content = repo.get_contents(file_path, ref=branch)
+
+            if content.size > Config.MAX_SINGLE_FILE_SIZE_MB * 1024 * 1024:
+                result = {
+                    'path': file_path,
+                    'content': f"[文件过大: {content.size / (1024*1024):.1f}MB > {Config.MAX_SINGLE_FILE_SIZE_MB}MB]",
+                    'size': content.size,
+                    'is_binary': False,
+                    'is_oversized': True
+                }
+            else:
+                try:
+                    if content.encoding == 'base64':
+                        decoded_content = base64.b64decode(content.content).decode('utf-8')
+                    else:
+                        decoded_content = content.content
+                    
+                    result = {
+                        'path': file_path,
+                        'content': decoded_content,
+                        'size': content.size,
+                        'is_binary': False,
+                        'is_oversized': False
+                    }
+                except UnicodeDecodeError:
+                    result = {
+                        'path': file_path,
+                        'content': f"[二进制文件或编码无法识别: {file_path}]",
+                        'size': content.size,
+                        'is_binary': True,
+                        'is_oversized': False
+                    }
+
+            self._save_to_cache(cache_key, result)
+            return result
+        except GithubException as e:
+            if e.status == 403 and 'abuse detection' in str(e):
+                time.sleep(30)
+                return self._fetch_file_content(repo, file_path, branch, owner, repo_name) # Retry
+            
+            return {
+                'path': file_path,
+                'content': f"[获取文件内容失败: {str(e)}]",
+                'size': 0,
+                'is_binary': False,
+                'is_oversized': False
+            }
+        except Exception as e:
+            return {
+                'path': file_path,
+                'content': f"[处理文件时出错: {str(e)}]",
+                'size': 0,
+                'is_binary': False,
+                'is_oversized': False
+            }
+
+    def get_file_content_batch(self, owner, repo_name, file_paths, branch=None, progress_callback=None):
         """批量获取文件内容"""
         try:
             repo = self.github.get_repo(f"{owner}/{repo_name}")
@@ -158,97 +233,31 @@ class GitHubHandler:
                 branch = repo.default_branch
             
             results = []
+            total_files = len(file_paths)
             
-            for i, file_path in enumerate(file_paths):
-                # 检查缓存
-                cache_key = f"file_{owner}_{repo_name}_{branch}_{file_path.replace('/', '_')}"
-                cached = self._get_from_cache(cache_key)
-                if cached:
-                    results.append(cached)
-                    continue
+            with ThreadPoolExecutor(max_workers=Config.CONCURRENT_REQUESTS) as executor:
+                future_to_path = {
+                    executor.submit(self._fetch_file_content, repo, path, branch, owner, repo_name): path
+                    for path in file_paths
+                }
                 
-                try:
-                    # 添加延迟避免触发限制
-                    if i > 0:  # 第一个文件不需要延迟
-                        time.sleep(self.request_delay)
-                    
-                    self._wait_for_rate_limit()
-                    content = repo.get_contents(file_path, ref=branch)
-                    
-                    # 检查文件大小
-                    if content.size > Config.MAX_SINGLE_FILE_SIZE_MB * 1024 * 1024:
-                        result = {
-                            'path': file_path,
-                            'content': f"[文件过大: {content.size / (1024*1024):.1f}MB > {Config.MAX_SINGLE_FILE_SIZE_MB}MB]",
-                            'size': content.size,
-                            'is_binary': False,
-                            'is_oversized': True
-                        }
-                    else:
-                        # 尝试解码文件内容
-                        try:
-                            if content.encoding == 'base64':
-                                decoded_content = base64.b64decode(content.content).decode('utf-8')
-                            else:
-                                decoded_content = content.content
-                            
-                            result = {
-                                'path': file_path,
-                                'content': decoded_content,
-                                'size': content.size,
-                                'is_binary': False,
-                                'is_oversized': False
-                            }
-                        except UnicodeDecodeError:
-                            result = {
-                                'path': file_path,
-                                'content': f"[二进制文件或编码无法识别: {file_path}]",
-                                'size': content.size,
-                                'is_binary': True,
-                                'is_oversized': False
-                            }
-                    
-                    # 保存到缓存
-                    self._save_to_cache(cache_key, result)
-                    results.append(result)
-                    
-                except GithubException as e:
-                    if e.status == 403 and 'abuse detection' in str(e):
-                        # 触发恶意检测，等待更长时间
-                        print(f"触发API限制，等待30秒后重试 {file_path}")
-                        time.sleep(30)
-                        # 重试一次
-                        try:
-                            content = repo.get_contents(file_path, ref=branch)
-                            # ... 重复解码逻辑
-                        except:
-                            # 如果重试仍然失败，记录错误并继续
-                            result = {
-                                'path': file_path,
-                                'content': f"[获取文件内容失败: API限制]",
-                                'size': 0,
-                                'is_binary': False,
-                                'is_oversized': False
-                            }
-                    else:
-                        result = {
-                            'path': file_path,
-                            'content': f"[获取文件内容失败: {str(e)}]",
+                processed_count = 0
+                for future in as_completed(future_to_path):
+                    try:
+                        results.append(future.result())
+                    except Exception as e:
+                        path = future_to_path[future]
+                        results.append({
+                            'path': path,
+                            'content': f"[获取内容时发生意外错误: {str(e)}]",
                             'size': 0,
                             'is_binary': False,
                             'is_oversized': False
-                        }
-                    results.append(result)
-                
-                except Exception as e:
-                    result = {
-                        'path': file_path,
-                        'content': f"[处理文件时出错: {str(e)}]",
-                        'size': 0,
-                        'is_binary': False,
-                        'is_oversized': False
-                    }
-                    results.append(result)
+                        })
+                    finally:
+                        processed_count += 1
+                        if progress_callback:
+                            progress_callback(processed_count, total_files)
             
             return results
             

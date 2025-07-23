@@ -145,15 +145,25 @@ class Validator:
         else:
             validated['exclude_dirs'] = []
         
-        # 验证output_format（可选，有默认值）
+        # 校验 output_format
         output_format = params.get('output_format', 'md')
-        validated['output_format'] = cls.validate_output_format(output_format)
+        if output_format not in Config.SUPPORTED_OUTPUT_FORMATS:
+            raise ValidationError(f"不支持的输出格式: {output_format}")
         
-        # 验证use_default_filters（可选，布尔值）
+        validated['output_format'] = output_format
+        
+        # 校验 output_mode
+        output_mode = params.get('output_mode', 'single')
+        if output_mode not in ['single', 'split']:
+            raise ValidationError(f"不支持的输出模式: {output_mode}")
+        
+        validated['output_mode'] = output_mode
+
+        # 校验 use_default_filters
         use_default_filters = params.get('use_default_filters', False)
-        if isinstance(use_default_filters, str):
-            validated['use_default_filters'] = use_default_filters.lower() in ['true', '1', 'on', 'yes']
-        else:
-            validated['use_default_filters'] = bool(use_default_filters)
+        if not isinstance(use_default_filters, bool):
+            raise ValidationError("use_default_filters 必须是布尔值")
+        
+        validated['use_default_filters'] = use_default_filters
         
         return validated 

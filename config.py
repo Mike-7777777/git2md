@@ -63,6 +63,7 @@ class Config:
     MAX_REPO_SIZE_MB = int(os.environ.get('MAX_REPO_SIZE_MB', 100))  # 最大仓库大小（MB）
     MAX_FILE_COUNT = int(os.environ.get('MAX_FILE_COUNT', 2000))   # 最大文件数量
     MAX_SINGLE_FILE_SIZE_MB = int(os.environ.get('MAX_SINGLE_FILE_SIZE_MB', 1))  # 单文件最大大小（MB）
+    MAX_SPLIT_FILE_SIZE_MB = float(os.environ.get('MAX_SPLIT_FILE_SIZE_MB', 1.5)) # 切分文件最大大小(MB)
     MAX_PARAM_LENGTH = 128  # 参数最大长度
     MAX_PARAM_ITEMS = 20    # 参数项目最大数量
     
@@ -70,6 +71,7 @@ class Config:
     DOWNLOAD_FOLDER = 'downloads'
     CACHE_FOLDER = 'cache'
     FILE_RETENTION_MINUTES = int(os.environ.get('FILE_RETENTION_MINUTES', 30))  # 文件保留时间（分钟）
+    CONCURRENT_REQUESTS = int(os.environ.get('CONCURRENT_REQUESTS', 10))  # 并发请求数量
     
     # 请求超时配置
     REQUEST_TIMEOUT = 30  # 秒
